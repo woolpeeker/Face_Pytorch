@@ -16,23 +16,27 @@ import os
 import torch
 
 
-def img_loader(path):
+def img_loader(path, use_gray=False):
     try:
         with open(path, 'rb') as f:
             img = cv2.imread(path)
             if len(img.shape) == 2:
                 img = np.stack([img] * 3, 2)
+            if use_gray:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                img = np.expand_dims(img, -1)
             return img
     except IOError:
         print('Cannot load image ' + path)
 
 
 class CASIAWebFace(data.Dataset):
-    def __init__(self, root, file_list, transform=None, loader=img_loader):
+    def __init__(self, root, file_list, transform=None, loader=img_loader, use_gray=False):
 
         self.root = root
         self.transform = transform
         self.loader = loader
+        self.use_gray = use_gray
 
         image_list = []
         label_list = []
@@ -52,7 +56,7 @@ class CASIAWebFace(data.Dataset):
         img_path = self.image_list[index]
         label = self.label_list[index]
 
-        img = self.loader(os.path.join(self.root, img_path))
+        img = self.loader(os.path.join(self.root, img_path), use_gray=self.use_gray)
 
         # random flip with ratio of 0.5
         flip = np.random.choice(2) * 2 - 1

@@ -105,3 +105,6 @@ venv.bak/
 # model or feature
 .mat
 .ckpt
+model/
+result/
+data/

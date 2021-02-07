@@ -1,13 +1,10 @@
 #!/usr/bin/env python
 # encoding: utf-8
 '''
-@author: wujiyang
-@contact: wujiyang@hust.edu.cn
-@file: train.py.py
-@time: 2018/12/21 17:37
-@desc: train script for deep face recognition
+forked from train.py
 '''
-
+import sys
+sys.path.append('./qqquantize')
 import os
 import torch.utils.data
 from torch.nn import DataParallel
@@ -15,7 +12,7 @@ from datetime import datetime
 from backbone.mobilefacenet import MobileFaceNet
 from backbone.cbam import CBAMResNet
 from backbone.attention import ResidualAttentionNet_56, ResidualAttentionNet_92
-from backbone.smallVGG import SmallVGG
+from backbone.smallVGG import SmallVGG, CRB
 from margin.ArcMarginProduct import ArcMarginProduct
 from margin.MultiMarginProduct import MultiMarginProduct
 from margin.CosineMarginProduct import CosineMarginProduct
@@ -25,19 +22,70 @@ from dataset.casia_webface import CASIAWebFace
 from dataset.lfw import LFW
 from torch.optim import lr_scheduler
 import torch.optim as optim
+import torch.nn as nn
 import time
 from eval_lfw import evaluation_10_fold, getFeatureFromTorch
 import numpy as np
 import torchvision.transforms as transforms
 import argparse
 from utils.model_summary import calc_flops
+import copy
+import qqquantize
+from qqquantize import utils as qutils
+import qqquantize
+from qqquantize.qconfig import DEFAULT_QAT_MODULE_MAPPING
+from qqquantize.quantize import ModelConverter
+from qqquantize.observers.histogramobserver import HistObserver, swap_minmax_to_hist
+from qqquantize.observers.minmaxchannelsobserver import MinMaxChannelsObserver, MovingAverageMinMaxChannelsObserver
+from qqquantize.observers.minmaxobserver import MinMaxObserver, MovingAverageMinMaxObserver
+from qqquantize.observers.fake_quantize import (
+    FakeQuantize,
+    Fake_quantize_per_channel,
+    Fake_quantize_per_tensor,
+    enable_fake_quant,
+    disable_fake_quant,
+    enable_observer,
+    disable_observer,
+    enable_calc_qparams,
+    disable_calc_qparams,
+    calc_qparams,
+)
+from easydict import EasyDict as edict
 
+def fuse_bn(model, inplace=False):
+    fuse_conv_bn = qutils.fuse_conv_bn
+    if not inplace:
+        model = copy.deepcopy(model)
+    for mod in model.modules():
+        if isinstance(mod, CRB):
+            mod.conv = fuse_conv_bn(mod.conv, mod.bn)
+            mod.bn = nn.Identity()
+    return model
+
+def inference_for_quant(net, margin, device, trainset, bs=128, num_workers=8):
+    loader = torch.utils.data.DataLoader(trainset, batch_size=bs,
+                                        shuffle=True, num_workers=num_workers)
+    net.eval()
+    correct = 0
+    total = 0
+    for i, data in enumerate(loader):
+        if i > 1000:
+            break
+        img, label = data[0].to(device), data[1].to(device)
+        raw_logits = net(img)
+        output = margin(raw_logits, label)
+        _, predict = torch.max(output.data, 1)
+        total += label.size(0)
+        correct += (np.array(predict.cpu()) == np.array(label.data.cpu())).sum()
+    print("inference_for_quant, train_accuracy: {:.4f}, ".format(correct/total))
+    net.train()
 
 def train(args):
     # gpu init
     multi_gpus = False
     if len(args.gpus.split(',')) > 1:
         multi_gpus = True
+    assert not multi_gpus, "not sure qqquantize works well when multi gpu"
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpus
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -104,18 +152,42 @@ def train(args):
         pass
     else:
         print(args.margin_type, 'is not available!')
+        exit(-1)
 
+    assert args.resume, 'train_quant must resume'
     if args.resume:
         print('resume the model parameters from: ', args.net_path, args.margin_path)
         net.load_state_dict(torch.load(args.net_path)['net_state_dict'])
         margin.load_state_dict(torch.load(args.margin_path)['net_state_dict'])
+        lr = 0.001
+    else:
+        lr = 0.1
+    
+    fuse_bn(net, True)
+    qconfig = edict({
+        'activation': FakeQuantize.with_args(
+            observer=MovingAverageMinMaxObserver,
+            quantize_func=Fake_quantize_per_tensor,
+            bits=8
+        ),
+        'weight': FakeQuantize.with_args(
+            observer=MinMaxObserver,
+            quantize_func=Fake_quantize_per_tensor,
+            bits=8
+        ),
+        'bias': FakeQuantize.with_args(bits=8),
+    })
+    # model = model.fuse()
+    qconverter = ModelConverter(qconfig)
+    net = qconverter(net)
 
+    
     # define optimizers for different layer
     criterion = torch.nn.CrossEntropyLoss().to(device)
     optimizer_ft = optim.SGD([
         {'params': net.parameters(), 'weight_decay': 5e-4},
         {'params': margin.parameters(), 'weight_decay': 5e-4}
-    ], lr=0.1, momentum=0.9, nesterov=True)
+    ], lr=lr, momentum=0.9, nesterov=True)
     exp_lr_scheduler = lr_scheduler.MultiStepLR(optimizer_ft, milestones=[6, 11, 16], gamma=0.1)
 
     if multi_gpus:
@@ -124,7 +196,21 @@ def train(args):
     else:
         net = net.to(device)
         margin = margin.to(device)
+    
+    net.eval()
+    disable_fake_quant(net)
+    disable_calc_qparams(net)
+    enable_observer(net)
+    inference_for_quant(net, margin, device, trainset)
+    calc_qparams(net)
 
+    enable_observer(net)
+    enable_fake_quant(net)
+    inference_for_quant(net, margin, device, trainset)
+    enable_calc_qparams(net)
+
+
+    print(net)
 
     best_lfw_acc = 0.0
     best_lfw_iters = 0
@@ -215,13 +301,13 @@ if __name__ == '__main__':
     parser.add_argument('--total_epoch', type=int, default=20, help='total epochs')
 
     parser.add_argument('--save_freq', type=int, default=3000, help='save frequency')
-    parser.add_argument('--test_freq', type=int, default=3000, help='test frequency')
-    parser.add_argument('--resume', type=int, default=False, help='resume model')
-    parser.add_argument('--net_path', type=str, default='', help='resume model')
-    parser.add_argument('--margin_path', type=str, default='', help='resume model')
+    parser.add_argument('--test_freq', type=int, default=1000, help='test frequency')
+    parser.add_argument('--resume', action='store_true', help='resume model')
+    parser.add_argument('--net_path', type=str, default='model/SMALLVGG/Iter_033000_net.ckpt', help='resume model')
+    parser.add_argument('--margin_path', type=str, default='model/SMALLVGG/Iter_033000_margin.ckpt', help='resume model')
     parser.add_argument('--save_dir', type=str, default='./model', help='model save dir')
-    parser.add_argument('--model_pre', type=str, default='', help='model prefix')
-    parser.add_argument('--gpus', type=str, default='0, 1', help='model prefix')
+    parser.add_argument('--model_pre', type=str, default='quant_', help='model prefix')
+    parser.add_argument('--gpus', type=str, default='0', help='model prefix')
 
     args = parser.parse_args()
 

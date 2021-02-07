@@ -16,23 +16,27 @@ import torch.utils.data as data
 import torch
 import torchvision.transforms as transforms
 
-def img_loader(path):
+def img_loader(path, use_gray):
     try:
         with open(path, 'rb') as f:
             img = cv2.imread(path)
             if len(img.shape) == 2:
                 img = np.stack([img] * 3, 2)
+            if use_gray:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                img = np.expand_dims(img, -1)
             return img
     except IOError:
         print('Cannot load image ' + path)
 
 class LFW(data.Dataset):
-    def __init__(self, root, file_list, transform=None, loader=img_loader):
+    def __init__(self, root, file_list, transform=None, loader=img_loader, use_gray=False):
 
         self.root = root
         self.file_list = file_list
         self.transform = transform
         self.loader = loader
+        self.use_gray = use_gray
         self.nameLs = []
         self.nameRs = []
         self.folds = []
@@ -41,17 +45,22 @@ class LFW(data.Dataset):
         with open(file_list) as f:
             pairs = f.read().splitlines()[1:]
         for i, p in enumerate(pairs):
-            p = p.split('\t')
+            if '\t' in p:
+                p = p.split('\t')
+            else:
+                p = p.split()
             if len(p) == 3:
-                nameL = p[0] + '/' + p[0] + '_' + '{:04}.jpg'.format(int(p[1]))
-                nameR = p[0] + '/' + p[0] + '_' + '{:04}.jpg'.format(int(p[2]))
+                nameL = p[0]
+                nameR = p[1]
                 fold = i // 600
-                flag = 1
+                flag = int(p[2])
             elif len(p) == 4:
                 nameL = p[0] + '/' + p[0] + '_' + '{:04}.jpg'.format(int(p[1]))
                 nameR = p[2] + '/' + p[2] + '_' + '{:04}.jpg'.format(int(p[3]))
                 fold = i // 600
                 flag = -1
+            else:
+                raise Exception('unkown data type for %s' % p)
             self.nameLs.append(nameL)
             self.nameRs.append(nameR)
             self.folds.append(fold)
@@ -59,8 +68,8 @@ class LFW(data.Dataset):
 
     def __getitem__(self, index):
 
-        img_l = self.loader(os.path.join(self.root, self.nameLs[index]))
-        img_r = self.loader(os.path.join(self.root, self.nameRs[index]))
+        img_l = self.loader(os.path.join(self.root, self.nameLs[index]), use_gray=self.use_gray)
+        img_r = self.loader(os.path.join(self.root, self.nameRs[index]), use_gray=self.use_gray)
         imglist = [img_l, cv2.flip(img_l, 1), img_r, cv2.flip(img_r, 1)]
 
         if self.transform is not None:

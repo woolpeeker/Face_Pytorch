@@ -1,3 +1,20 @@
+# New Readme:
+add quantized module  
+add deploy module
+
+quantized module is from https://github.com/woolpeeker/qqquantize.git  
+deploy module is from https://github.com/deepinsight/insightface/, python-package, deploy
+
+1. git clone qqquantize module into root directory,
+2. use tools/load_images_from_bin.py generate dataset from insightface .bin or .rec files.
+3. use train.py train a model
+3. use train_quant.py quantize the model
+
+
+
+
+# Original Readme
+
 >2019.07.14    
 >Currently, I have graduated from campus and doing another kind of job. So this project may not be updated again.
 

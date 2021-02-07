@@ -59,8 +59,9 @@ def load_image_from_bin(bin_path, save_dir):
 
 
 if __name__ == '__main__':
-    #bin_path = 'D:/face_data_emore/faces_webface_112x112/lfw.bin'
-    #save_dir = 'D:/face_data_emore/faces_webface_112x112/lfw'
-    rec_path = 'D:/face_data_emore/faces_emore'
-    load_mx_rec(rec_path)
-    #load_image_from_bin(bin_path, save_dir)
+    # rec_path = 'D:/face_data_emore/faces_emore'
+    # load_mx_rec(rec_path)
+
+    bin_path = '/media/HD1/datasets/faces_emore/lfw.bin'
+    save_dir = '/media/HD1/datasets/faces_emore/lfw'
+    load_image_from_bin(bin_path, save_dir)
